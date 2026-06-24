@@ -34,12 +34,9 @@ DB_FILE = "database.db"
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Configuration tracking
     c.execute('''CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)''')
-    # Ticket state tracking
     c.execute('''CREATE TABLE IF NOT EXISTS tickets 
                  (channel_id INTEGER PRIMARY KEY, user_id INTEGER, status TEXT, last_msg_at TEXT, claimed_by INTEGER)''')
-    # Stats
     c.execute('''INSERT OR IGNORE INTO config (key, value) VALUES ('orders_completed', '0')''')
     conn.commit()
     conn.close()
@@ -81,20 +78,25 @@ class NexusBot(commands.Bot):
 
     async def setup_hook(self):
         self.loop.create_task(self.initialize_views())
-        # Start background loop for auto-close check
         self.inactivity_check.start()
-        await self.tree.sync()
+        
+        # --- INSTANT SYNC FIX FOR TESTING ---
+        try:
+            guild_object = discord.Object(id=GUILD_ID)
+            self.tree.copy_global_to(guild=guild_object)
+            synced = await self.tree.sync(guild=guild_object)
+            print(f"🌲 Instant Sync: Registered {len(synced)} slash commands directly to Guild {GUILD_ID}.")
+        except Exception as e:
+            print(f"Failed to sync commands to target guild: {e}")
 
     async def initialize_views(self):
-        # Keeps persistent buttons active across restarts
         self.add_view(MainTicketPanel())
 
     @tasks.loop(minutes=10)
     async def inactivity_check(self):
-        """Auto-close tickets after 24 hours of total inactivity"""
+        """Auto-close open tickets after 24 hours of inactivity"""
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        # 24 Hours Threshold
         threshold = datetime.now(timezone.utc) - timedelta(hours=24)
         c.execute("SELECT channel_id, user_id FROM tickets WHERE status='open'")
         open_tickets = c.fetchall()
@@ -105,7 +107,6 @@ class NexusBot(commands.Bot):
                 c.execute("DELETE FROM tickets WHERE channel_id=?", (ch_id,))
                 continue
                 
-            # Fetch last message timestamp
             last_msg_time = None
             async for msg in channel.history(limit=1):
                 last_msg_time = msg.created_at
@@ -121,7 +122,7 @@ bot = NexusBot()
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user.name} | Running with Sqlite Memory Persistence.")
+    print(f"Logged in as {bot.user.name} | Systems Operational.")
 
 @bot.event
 async def on_member_join(member):
@@ -133,7 +134,6 @@ async def on_member_join(member):
 
 # --- Helper Function: Transcript & Cleanup ---
 async def handle_ticket_close(channel: discord.TextChannel, client: commands.Bot):
-    # 1. Transcript Compilation
     transcript = f"--- Transcript for Ticket Channel: {channel.name} ---\n"
     async for message in channel.history(limit=1000, oldest_first=True):
         time_str = message.created_at.strftime('%Y-%m-%d %H:%M:%S')
@@ -142,12 +142,10 @@ async def handle_ticket_close(channel: discord.TextChannel, client: commands.Bot
             for attach in message.attachments:
                 transcript += f"   [Attachment: {attach.url}]\n"
 
-    # Save to a temporary file layout
     file_path = f"transcript-{channel.name}.txt"
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(transcript)
 
-    # 2. Forward to logs
     log_channel = channel.guild.get_channel(LOG_CHANNEL_ID)
     if log_channel:
         embed = discord.Embed(
@@ -157,7 +155,6 @@ async def handle_ticket_close(channel: discord.TextChannel, client: commands.Bot
         )
         await log_channel.send(embed=embed, file=discord.File(file_path))
 
-    # Remove file from workspace and database log
     try:
         os.remove(file_path)
     except:
@@ -172,19 +169,17 @@ async def handle_ticket_close(channel: discord.TextChannel, client: commands.Bot
     await asyncio.sleep(3)
     await channel.delete()
 
-# --- Interactive Panels & Interface logic ---
+# --- Main Ticket Dashboard View ---
 class MainTicketPanel(View):
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Create Ticket", style=discord.ButtonStyle.secondary, emoji="📩", custom_id="persistent_create_ticket")
-    @app_commands.checks.cooldown(1, 10.0, key=lambda i: i.user.id) # Rate Limit 10s
+    @app_commands.checks.cooldown(1, 10.0, key=lambda i: i.user.id)
     async def create_ticket(self, interaction: discord.Interaction, button: Button):
-        # Blacklist check
         if interaction.user.get_role(BLACKLIST_ROLE_ID):
             return await interaction.response.send_message("❌ You are currently blacklisted from creating support tickets.", ephemeral=True)
 
-        # Duplicate active check
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute("SELECT channel_id FROM tickets WHERE user_id=? AND status='open'", (interaction.user.id,))
@@ -204,7 +199,6 @@ class MainTicketPanel(View):
         channel_name = f"ticket-{interaction.user.name}"
         ticket_channel = await guild.create_text_channel(name=channel_name, overwrites=overwrites)
 
-        # Track active ticket in DB
         c.execute("INSERT INTO tickets VALUES (?, ?, 'open', ?, NULL)", (ticket_channel.id, interaction.user.id, datetime.now(timezone.utc).isoformat()))
         conn.commit()
         conn.close()
@@ -218,7 +212,6 @@ class MainTicketPanel(View):
         )
         await ticket_channel.send(content=interaction.user.mention, embed=embed, view=OrderSelectionView())
 
-# --- Cooldown Error Handler for Button ---
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CommandOnCooldown):
@@ -297,7 +290,7 @@ class PaymentSelectionView(View):
         await interaction.message.edit(view=self)
 
         address = CRYPTO_ADDRESSES[crypto_type]
-        embed = discord.Embed(title=f"💸 Complete Payment — {crypto_type}", description=f"Send exact dynamic asset cost equivalent of **{self.price}**.", color=0x2B2D31)
+        embed = discord.Embed(title=f"💸 Complete Payment — {crypto_type}", description=f"Send exact payment equivalent of **{self.price}**.", color=0x2B2D31)
         embed.add_field(name="Address", value=f"`{address}`", inline=False)
         embed.set_footer(text="Upload payment validation confirmation/screenshot here when completed.")
         await interaction.response.send_message(embed=embed)
@@ -309,7 +302,6 @@ class PaymentSelectionView(View):
             log_embed.add_field(name="Channel Link", value=interaction.channel.mention, inline=True)
             log_embed.add_field(name="Details", value=f"{self.tier} Boosts ({self.duration}) | **{crypto_type}**", inline=False)
             
-            # Send view containing "Confirm Payment" button to the staff context logs channel
             await log_channel.send(content=f"<@&{STAFF_ROLE_ID}>", embed=log_embed, view=StaffOrderConfirmationView(buyer_id=interaction.user.id, detail_str=f"{self.tier} ({self.duration})", channel_id=interaction.channel.id))
 
     @discord.ui.button(label="BTC", style=discord.ButtonStyle.primary)
@@ -325,7 +317,7 @@ class PaymentSelectionView(View):
         await self.send_invoice(interaction, "ETH")
 
 
-# --- Staff Confirmation & Feedback Mechanics ---
+# --- Staff Confirmation & Feedback Selection Matrix ---
 class StaffOrderConfirmationView(View):
     def __init__(self, buyer_id: int, detail_str: str, channel_id: int):
         super().__init__(timeout=None)
@@ -338,17 +330,13 @@ class StaffOrderConfirmationView(View):
         button.disabled = True
         await interaction.message.edit(view=self)
         
-        # Increment Completed Orders counter in local server database layout
         new_count = increment_orders()
         await interaction.response.send_message(f"🟢 Order validated by {interaction.user.mention}. Internal Order Counter updated to: **{new_count}**")
 
-        # Ping customer ticket context or DM if ticket was manually shifted
         target_ch = interaction.guild.get_channel(self.channel_id)
         if target_ch:
             embed = discord.Embed(title="🎉 Payment Confirmed!", description="Your transaction has been cleared by administration. Deployment processing will complete momentarily.", color=0x2ECC71)
             await target_ch.send(content=f"<@{self.buyer_id}>", embed=embed)
-            
-            # Send Review Selection View directly to the ticket interface space
             await target_ch.send(view=ReviewSystemView(buyer_id=self.buyer_id))
 
 class ReviewSystemView(View):
@@ -373,18 +361,17 @@ class ReviewSystemView(View):
         select.disabled = True
         await interaction.message.edit(view=self)
         
-        # Look for custom verification target review channel (Using standard Log target for safety backup fallback)
         log_channel = interaction.guild.get_channel(LOG_CHANNEL_ID)
         if log_channel:
             rev_embed = discord.Embed(title="✨ Customer Review Received", color=0xF1C40F)
             rev_embed.add_field(name="User", value=interaction.user.mention, inline=True)
-            rev_embed.add_field(name="Rating Structure", value=f"**{select.values[0]} / 5 Stars**", inline=True)
+            rev_embed.add_field(name="Rating", value=f"**{select.values[0]} / 5 Stars**", inline=True)
             await log_channel.send(embed=rev_embed)
             
         await interaction.response.send_message("💖 Thank you for your feedback validation! Your response has been securely filed.")
 
-# --- Upgraded Command Infrastructure Matrix ---
-@bot.tree.command(name="welcome", description="Configure server greeting zone mapping pipeline setup.")
+# --- Upgraded Slash Commands Matrix ---
+@bot.tree.command(name="welcome", description="Configure server greeting channel layout.")
 @app_commands.checks.has_permissions(administrator=True)
 async def welcome(interaction: discord.Interaction, channel: discord.TextChannel):
     set_db_value(f"welcome_{interaction.guild.id}", channel.id)
@@ -408,7 +395,7 @@ async def setup_ticket(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(manage_channels=True)
 async def rename(interaction: discord.Interaction, new_name: str):
     await interaction.channel.edit(name=new_name.lower().replace(" ", "-"))
-    await interaction.response.send_message(f"✅ Context channel interface reassigned locally to: `{new_name}`")
+    await interaction.response.send_message(f"✅ Context channel interface assigned locally to: `{new_name}`")
 
 @bot.tree.command(name="claim", description="Claim administrative handling responsibility ownership rights over active room.")
 @app_commands.checks.has_permissions(manage_messages=True)
@@ -451,12 +438,12 @@ async def unclaim(interaction: discord.Interaction):
     
     base_name = interaction.channel.name.split("-claimed-")[0]
     await interaction.channel.edit(name=base_name)
-    await interaction.response.send_message("🔓 Processing state reset to unassigned. Ticket opened back up to administrative staff pooling.")
+    await interaction.response.send_message("🔓 Processing state reset to unassigned. Ticket opened back up to staff pooling.")
 
 @bot.tree.command(name="stats", description="Query total historical volumetric processing transaction data loops.")
 async def stats(interaction: discord.Interaction):
     count = get_db_value("orders_completed", "0")
-    embed = discord.Embed(title="📊 NexusBoosts Performance Status Metric Metrics", color=0x3498DB)
+    embed = discord.Embed(title="📊 NexusBoosts Performance Metrics", color=0x3498DB)
     embed.add_field(name="Fulfilled Volume Orders Counter", value=f"🚀 **{count} Total Orders Completed**", inline=False)
     await interaction.response.send_message(embed=embed)
 
