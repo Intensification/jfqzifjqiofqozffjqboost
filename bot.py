@@ -131,6 +131,17 @@ async def on_ready():
 
 @bot.event
 async def on_member_join(member):
+    # Autorole Logic
+    autorole_id = get_db_value(f"autorole_{member.guild.id}", None)
+    if autorole_id:
+        role = member.guild.get_role(int(autorole_id))
+        if role:
+            try:
+                await member.add_roles(role)
+            except Exception as e:
+                print(f"Failed to apply autorole to {member.name}: {e}")
+
+    # Welcome Logic
     welcome_ch_id = get_db_value(f"welcome_{member.guild.id}", None)
     if welcome_ch_id:
         channel = member.guild.get_channel(int(welcome_ch_id))
@@ -406,6 +417,12 @@ class ReviewSystemView(View):
         await interaction.response.send_message("💖 Thank you for your feedback validation! Your response has been securely filed.")
 
 # --- Upgraded Slash Commands Matrix ---
+@bot.tree.command(name="autorole", description="Configure the automatic role assigned to joining members.")
+@app_commands.checks.has_permissions(administrator=True)
+async def autorole(interaction: discord.Interaction, role: discord.Role):
+    set_db_value(f"autorole_{interaction.guild.id}", role.id)
+    await interaction.response.send_message(f"✨ **Success:** New users will automatically receive the {role.mention} role upon joining.", ephemeral=True)
+
 @bot.tree.command(name="purga", description="Deletes a specified volume of historical content records from active channel configuration array.")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def purga(interaction: discord.Interaction, amount: int):
