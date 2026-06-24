@@ -20,9 +20,10 @@ BLACKLIST_ROLE_ID = int(os.getenv("BLACKLIST_ROLE_ID"))
 REVIEW_LOG_CHANNEL_ID = int(os.getenv("REVIEW_LOG_CHANNEL_ID"))
 VERIFIED_CUSTOMER_ROLE_ID = int(os.getenv("VERIFIED_CUSTOMER_ROLE_ID"))
 
+# UPDATED: Matching the new menu rates precisely
 PRICES = {
-    "7x": {"1m": "$3.50 / £3.00", "3m": "$8.00 / £6.50", "6m": "$15.00 / £12.00"},
-    "14x": {"1m": "$6.00 / £5.00", "3m": "$15.00 / £12.00", "6m": "$28.00 / £22.00"},
+    "7x": {"1 Month": "$5.00 / £4.00", "3 Months": "$11.00 / £9.00", "6 Months": "$20.00 / £16.00"},
+    "14x": {"1 Month": "$8.00 / £6.50", "3 Months": "$18.00 / £14.50", "6 Months": "$32.00 / £26.00"},
 }
 
 CRYPTO_ADDRESSES = {
@@ -79,7 +80,6 @@ class NexusBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True
-        # FIXED: Prefix must be "," so text parsing triggers on ,command execution
         super().__init__(command_prefix=",", intents=intents)
 
     async def setup_hook(self):
@@ -269,7 +269,7 @@ class DurationSelectionView(View):
             item.disabled = True
         await interaction.message.edit(view=self)
 
-        price = PRICES[self.package_tier][duration_key]
+        price = PRICES[self.package_tier][label]
         embed = discord.Embed(
             title="💳 Payment Methods Available",
             description=f"Selected: **{self.package_tier} Boosts for {label}**\nCost: **{price}**\n\nChoose payment gateway:",
@@ -413,7 +413,7 @@ class ReviewSystemView(View):
         await interaction.response.send_message("💖 Thank you for your feedback validation! Your response has been securely filed.")
 
 
-# --- Unified Hybrid Command Matrix (Perfect compatibility for ',' and '/') ---
+# --- Unified Hybrid Command Matrix ---
 
 @bot.hybrid_command(name="autorole", description="Configure the automatic role assigned to joining members.")
 @commands.has_permissions(administrator=True)
@@ -438,12 +438,22 @@ async def welcome(ctx: commands.Context, channel: discord.TextChannel):
 @bot.hybrid_command(name="setup_ticket", description="Deploys the production framework panel layout configuration dashboard.")
 @commands.has_permissions(administrator=True)
 async def setup_ticket(ctx: commands.Context):
+    # FIXED: Layout matches layout and pricing requested directly
     embed = discord.Embed(
         title="═══ nexusboosts — premium menu ═══",
         description=(
-            "✨ **[ package level 2 ]** — 7x server boosts\n├─ 1 month | $3.50 / £3.00\n├─ 3 months | $8.00 / £6.50\n└─ 6 months | $15.00 / £12.00\n\n"
-            "🚀 **[ package level 3 ]** — 14x server boosts\n├─ 1 month | $6.00 / £5.00\n├─ 3 months | $15.00 / £12.00\n└─ 6 months | $28.00 / £22.00\n└─ *full replacement warranty included*\n\n"
-            "💳 **[ payment methods ]**\n└─ crypto (btc, ltc, eth)\n\nReady to order? Click the button below to secure your boosts."
+            "\n📦 [ package level 2 ] — 7x server boosts\n"
+            "├─ 🕒 1 month  │ $5.00 / £4.00\n"
+            "├─ 🗓️ 3 months │ $11.00 / £9.00\n"
+            "└─ 💎 6 months │ $20.00 / £16.00\n\n"
+            "💎 [ package level 3 ] — 14x server boosts\n"
+            "├─ 🕒 1 month  │ $8.00 / £6.50\n"
+            "├─ 🗓️ 3 months │ $18.00 / £14.50\n"
+            "└─ 💎 6 months │ $32.00 / £26.00\n"
+            "└─ 🛡️ full replacement warranty included\n\n"
+            "💳 [ payment methods ]\n"
+            "└─ 🪙 crypto (btc, ltc, eth)\n\n"
+            "Ready to order? Click the button below to secure your boosts."
         ),
         color=0x2B2D31,
     )
