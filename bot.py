@@ -423,9 +423,9 @@ async def autorole(interaction: discord.Interaction, role: discord.Role):
     set_db_value(f"autorole_{interaction.guild.id}", role.id)
     await interaction.response.send_message(f"✨ **Success:** New users will automatically receive the {role.mention} role upon joining.", ephemeral=True)
 
-@bot.tree.command(name="purga", description="Deletes a specified volume of historical content records from active channel configuration array.")
+@bot.tree.command(name="purge", description="Deletes a specified volume of historical content records from active channel configuration array.")
 @app_commands.checks.has_permissions(manage_messages=True)
-async def purga(interaction: discord.Interaction, amount: int):
+async def purge(interaction: discord.Interaction, amount: int):
     if amount < 1:
         return await interaction.response.send_message("❌ Amount must be greater than zero.", ephemeral=True)
     
