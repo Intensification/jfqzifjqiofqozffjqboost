@@ -17,6 +17,10 @@ LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID"))
 STAFF_ROLE_ID = int(os.getenv("STAFF_ROLE_ID"))
 BLACKLIST_ROLE_ID = int(os.getenv("BLACKLIST_ROLE_ID"))
 
+# Target ID structures updated as requested via your configuration profile mapping 
+REVIEW_LOG_CHANNEL_ID = 1519098165645541447
+VERIFIED_CUSTOMER_ROLE_ID = 1519094176350732368
+
 PRICES = {
     "7x": {"1m": "$3.50 / £3.00", "3m": "$8.00 / £6.50", "6m": "$15.00 / £12.00"},
     "14x": {"1m": "$6.00 / £5.00", "3m": "$15.00 / £12.00", "6m": "$28.00 / £22.00"},
@@ -37,6 +41,9 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS tickets 
                  (channel_id INTEGER PRIMARY KEY, user_id INTEGER, status TEXT, last_msg_at TEXT, claimed_by INTEGER)''')
+    # Track order data parameters within state context to properly bind variables to feedback objects
+    c.execute('''CREATE TABLE IF NOT EXISTS order_details
+                 (channel_id INTEGER PRIMARY KEY, package_tier TEXT, duration TEXT, price TEXT, crypto_used TEXT)''')
     c.execute('''INSERT OR IGNORE INTO config (key, value) VALUES ('orders_completed', '0')''')
     conn.commit()
     conn.close()
@@ -80,14 +87,9 @@ class NexusBot(commands.Bot):
         self.loop.create_task(self.initialize_views())
         self.inactivity_check.start()
         
-        # --- FIXED LOCAL SYNC ---
         try:
             guild_object = discord.Object(id=GUILD_ID)
-            
-            # This links all commands declared in the file straight into your specific Guild
             self.tree.copy_global_to(guild=guild_object)
-            
-            # This forces Discord to overwrite your specific server's commands instantly
             synced = await self.tree.sync(guild=guild_object)
             print(f"🌲 Clean Sync: Registered {len(synced)} slash commands directly to Guild {GUILD_ID}.")
         except Exception as e:
@@ -167,6 +169,7 @@ async def handle_ticket_close(channel: discord.TextChannel, client: commands.Bot
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("DELETE FROM tickets WHERE channel_id=?", (channel.id,))
+    c.execute("DELETE FROM order_details WHERE channel_id=?", (channel.id,))
     conn.commit()
     conn.close()
 
@@ -293,6 +296,14 @@ class PaymentSelectionView(View):
             item.disabled = True
         await interaction.message.edit(view=self)
 
+        # Store transactional variables safely inside relational database memory state
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("INSERT OR REPLACE INTO order_details VALUES (?, ?, ?, ?, ?)", 
+                  (interaction.channel.id, self.tier, self.duration, self.price, crypto_type))
+        conn.commit()
+        conn.close()
+
         address = CRYPTO_ADDRESSES[crypto_type]
         embed = discord.Embed(title=f"💸 Complete Payment — {crypto_type}", description=f"Send exact payment equivalent of **{self.price}**.", color=0x2B2D31)
         embed.add_field(name="Address", value=f"`{address}`", inline=False)
@@ -337,6 +348,16 @@ class StaffOrderConfirmationView(View):
         new_count = increment_orders()
         await interaction.response.send_message(f"🟢 Order validated by {interaction.user.mention}. Internal Order Counter updated to: **{new_count}**")
 
+        # Assign verified customer role directly to purchasing target ID structure as requested
+        buyer_member = interaction.guild.get_member(self.buyer_id)
+        if buyer_member:
+            role_object = interaction.guild.get_role(VERIFIED_CUSTOMER_ROLE_ID)
+            if role_object:
+                try:
+                    await buyer_member.add_roles(role_object)
+                except Exception as e:
+                    print(f"Failed allocating customer role permissions: {e}")
+
         target_ch = interaction.guild.get_channel(self.channel_id)
         if target_ch:
             embed = discord.Embed(title="🎉 Payment Confirmed!", description="Your transaction has been cleared by administration. Deployment processing will complete momentarily.", color=0x2ECC71)
@@ -365,16 +386,43 @@ class ReviewSystemView(View):
         select.disabled = True
         await interaction.message.edit(view=self)
         
-        log_channel = interaction.guild.get_channel(LOG_CHANNEL_ID)
-        if log_channel:
-            rev_embed = discord.Embed(title="✨ Customer Review Received", color=0xF1C40F)
-            rev_embed.add_field(name="User", value=interaction.user.mention, inline=True)
-            rev_embed.add_field(name="Rating", value=f"**{select.values[0]} / 5 Stars**", inline=True)
-            await log_channel.send(embed=rev_embed)
+        # Read the stored tracking details from runtime state database storage maps
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT package_tier, duration, price, crypto_used FROM order_details WHERE channel_id=?", (interaction.channel.id,))
+        row = c.fetchone()
+        conn.close()
+
+        pkg = row[0] if row else "Unknown Tier"
+        dur = row[1] if row else "Unknown Duration"
+        prc = row[2] if row else "N/A"
+        crp = row[3] if row else "N/A"
+
+        # Routing performance values directly into the custom requested feedback log channel endpoint configuration
+        review_channel = interaction.guild.get_channel(REVIEW_LOG_CHANNEL_ID)
+        if review_channel:
+            rev_embed = discord.Embed(title="✨ New Feedback Verification Record", color=0xF1C40F)
+            rev_embed.add_field(name="User Node Identity", value=interaction.user.mention, inline=True)
+            rev_embed.add_field(name="Rating Evaluated", value=f"**{select.values[0]} / 5 Stars**", inline=True)
+            rev_embed.add_field(name="Item Order Package", value=f"`{pkg} Boosts ({dur})`", inline=False)
+            rev_embed.add_field(name="Cost Verified", value=f"`{prc}`", inline=True)
+            rev_embed.add_field(name="Currency Processing", value=f"`{crp}`", inline=True)
+            await review_channel.send(embed=rev_embed)
             
         await interaction.response.send_message("💖 Thank you for your feedback validation! Your response has been securely filed.")
 
 # --- Upgraded Slash Commands Matrix ---
+@bot.tree.command(name="purge", description="Deletes a specified volume of historical content records from active channel configuration array.")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def purge(interaction: discord.Interaction, amount: int):
+    if amount < 1:
+        return await interaction.response.send_message("❌ Amount argument parameters must hold a sequence integer evaluation greater than zero.", ephemeral=True)
+    
+    # Defer interaction to provide leeway processing message structures over thread contexts safely
+    await interaction.response.defer(ephemeral=True)
+    deleted_items = await interaction.channel.purge(limit=amount)
+    await interaction.followup.send(f"🧹 Cleaned up and deleted `{len(deleted_items)}` active items from historical context logs.", ephemeral=True)
+
 @bot.tree.command(name="welcome", description="Configure server greeting channel layout.")
 @app_commands.checks.has_permissions(administrator=True)
 async def welcome(interaction: discord.Interaction, channel: discord.TextChannel):
