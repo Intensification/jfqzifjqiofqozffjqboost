@@ -80,14 +80,21 @@ class NexusBot(commands.Bot):
         self.loop.create_task(self.initialize_views())
         self.inactivity_check.start()
         
-        # --- INSTANT SYNC FIX FOR TESTING ---
+        # --- CLEAN SINGLE-SYNC INFRASTRUCTURE ---
         try:
             guild_object = discord.Object(id=GUILD_ID)
+            
+            # 1. Clear any old global commands causing duplicates
+            self.tree.clear_commands(guild=None)
+            await self.tree.sync(guild=None)
+            
+            # 2. Assign and sync commands strictly to your Guild ID
             self.tree.copy_global_to(guild=guild_object)
             synced = await self.tree.sync(guild=guild_object)
-            print(f"🌲 Instant Sync: Registered {len(synced)} slash commands directly to Guild {GUILD_ID}.")
+            
+            print(f"🌲 Clean Sync: Registered {len(synced)} unique slash commands directly to Guild {GUILD_ID}.")
         except Exception as e:
-            print(f"Failed to sync commands to target guild: {e}")
+            print(f"Failed to sync commands: {e}")
 
     async def initialize_views(self):
         self.add_view(MainTicketPanel())
