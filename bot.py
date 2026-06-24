@@ -20,10 +20,9 @@ BLACKLIST_ROLE_ID = int(os.getenv("BLACKLIST_ROLE_ID"))
 REVIEW_LOG_CHANNEL_ID = int(os.getenv("REVIEW_LOG_CHANNEL_ID"))
 VERIFIED_CUSTOMER_ROLE_ID = int(os.getenv("VERIFIED_CUSTOMER_ROLE_ID"))
 
-# Premium Menu Pricing Structures
 PRICES = {
-    "7x": {"1m": "$5.00 / £4.00", "3m": "$11.00 / £9.00", "6m": "$20.00 / £16.00"},
-    "14x": {"1m": "$8.00 / £6.50", "3m": "$18.00 / £14.50", "6m": "$32.00 / £26.00"},
+    "7x": {"1m": "$3.50 / £3.00", "3m": "$8.00 / £6.50", "6m": "$15.00 / £12.00"},
+    "14x": {"1m": "$6.00 / £5.00", "3m": "$15.00 / £12.00", "6m": "$28.00 / £22.00"},
 }
 
 CRYPTO_ADDRESSES = {
@@ -43,8 +42,6 @@ def init_db():
                  (channel_id INTEGER PRIMARY KEY, user_id INTEGER, status TEXT, last_msg_at TEXT, claimed_by INTEGER)''')
     c.execute('''CREATE TABLE IF NOT EXISTS order_details
                  (channel_id INTEGER PRIMARY KEY, package_tier TEXT, duration TEXT, price TEXT, crypto_used TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS warnings 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, guild_id INTEGER, reason TEXT, moderator_id INTEGER, timestamp TEXT)''')
     c.execute('''INSERT OR IGNORE INTO config (key, value) VALUES ('orders_completed', '0')''')
     conn.commit()
     conn.close()
@@ -62,7 +59,6 @@ def get_db_value(key, default="0"):
 def set_db_value(key, value):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO config WHERE key=?", (key, str(value)))
     c.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", (key, str(value)))
     conn.commit()
     conn.close()
@@ -77,24 +73,13 @@ def increment_orders():
     conn.close()
     return val
 
-# --- Mod Logging Helper ---
-async def log_mod_action(guild: discord.Guild, action: str, target: discord.User, moderator: discord.User, reason: str):
-    log_channel = guild.get_channel(LOG_CHANNEL_ID)
-    if not log_channel:
-        return
-    embed = discord.Embed(title=f"🛡️ Moderation Action: {action}", color=0xE74C3C, timestamp=datetime.now(timezone.utc))
-    embed.add_field(name="Target User", value=f"{target.mention} (`{target.id}`)", inline=True)
-    embed.add_field(name="Moderator", value=f"{moderator.mention}", inline=True)
-    embed.add_field(name="Reason", value=reason, inline=False)
-    await log_channel.send(embed=embed)
-
 # --- Custom Bot Class ---
 class NexusBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True
-        # Explicitly setting command prefix to handle ',' inputs globally
+        # FIXED: Prefix must be "," so text parsing triggers on ,command execution
         super().__init__(command_prefix=",", intents=intents)
 
     async def setup_hook(self):
@@ -105,7 +90,7 @@ class NexusBot(commands.Bot):
             guild_object = discord.Object(id=GUILD_ID)
             self.tree.copy_global_to(guild=guild_object)
             synced = await self.tree.sync(guild=guild_object)
-            print(f"🌲 Clean Sync: Registered {len(synced)} hybrid commands directly to Guild {GUILD_ID}.")
+            print(f"🌲 Clean Sync: Registered {len(synced)} slash commands directly to Guild {GUILD_ID}.")
         except Exception as e:
             print(f"Failed to sync commands: {e}")
 
@@ -428,160 +413,7 @@ class ReviewSystemView(View):
         await interaction.response.send_message("💖 Thank you for your feedback validation! Your response has been securely filed.")
 
 
-# --- Standardized Hybrid Commands Section (Works via , prefix AND / slash) ---
-
-@bot.hybrid_command(name="slowmode", description="Sets slowmode on a channel to prevent message spam from people.")
-@commands.has_permissions(manage_channels=True)
-async def slowmode(ctx: commands.Context, seconds: int):
-    await ctx.channel.edit(slowmode_delay=seconds)
-    await ctx.send(f"⏳ **Slowmode updated:** Channel delay updated to `{seconds}` seconds.")
-
-@bot.hybrid_command(name="setstatus", description="Lets staff update a custom bot status/presence message on demand.")
-@commands.has_role(STAFF_ROLE_ID)
-async def setstatus(ctx: commands.Context, *, status_message: str):
-    await bot.change_presence(activity=discord.CustomActivity(name=status_message))
-    await ctx.send(f"🤖 **Status Updated:** Bot presence updated to: `{status_message}`")
-
-@bot.hybrid_command(name="warn", description="Issues a warning to a user, logged silently to a mod-log channel.")
-@commands.has_permissions(manage_messages=True)
-async def warn(ctx: commands.Context, user: discord.Member, *, reason: str = "No reason provided."):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    now_str = datetime.now(timezone.utc).isoformat()
-    c.execute("INSERT INTO warnings (user_id, guild_id, reason, moderator_id, timestamp) VALUES (?, ?, ?, ?, ?)",
-              (user.id, ctx.guild.id, reason, ctx.author.id, now_str))
-    conn.commit()
-    conn.close()
-    
-    if ctx.interaction:
-        await ctx.send(f"⚠️ {user.mention} has been warned.", ephemeral=True)
-    else:
-        try:
-            await ctx.message.delete()
-        except:
-            pass
-        await ctx.send(f"⚠️ Warning silently logged for {user.mention}.", delete_after=5.0)
-        
-    await log_mod_action(ctx.guild, "Warn", user, ctx.author, reason)
-
-@bot.hybrid_command(name="warnings", description="Displays how many warnings a user has accumulated.")
-@commands.has_permissions(manage_messages=True)
-async def warnings(ctx: commands.Context, user: discord.Member):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT reason, moderator_id, timestamp FROM warnings WHERE user_id=? AND guild_id=?", (user.id, ctx.guild.id))
-    rows = c.fetchall()
-    conn.close()
-    
-    embed = discord.Embed(title=f"📋 Infraction Profile: {user.name}", color=0xF1C40F)
-    embed.description = f"Total historical warnings: **{len(rows)}**"
-    
-    for idx, (reason, mod_id, ts) in enumerate(rows, 1):
-        try:
-            ts_formatted = datetime.fromisoformat(ts).strftime('%Y-%m-%d %H:%M')
-        except:
-            ts_formatted = ts
-        embed.add_field(name=f"Warning #{idx} ({ts_formatted})", value=f"**Reason:** {reason}\n**Moderator:** <@{mod_id}>", inline=False)
-        
-    await ctx.send(embed=embed)
-
-@bot.hybrid_command(name="clearwarnings", description="Removes all warnings from a user, admin only.")
-@commands.has_permissions(administrator=True)
-async def clearwarnings(ctx: commands.Context, user: discord.Member):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("DELETE FROM warnings WHERE user_id=? AND guild_id=?", (user.id, ctx.guild.id))
-    conn.commit()
-    conn.close()
-    await ctx.send(f"🧹 Successfully cleared all warnings for {user.mention}.")
-
-@bot.hybrid_command(name="kick", description="Kicks a user with a reason, logged to mod-log channel.")
-@commands.has_permissions(kick_members=True)
-async def kick(ctx: commands.Context, user: discord.Member, *, reason: str = "No reason provided."):
-    await user.kick(reason=reason)
-    await ctx.send(f"👢 **{user.name}** has been kicked from the server.")
-    await log_mod_action(ctx.guild, "Kick", user, ctx.author, reason)
-
-@bot.hybrid_command(name="ban", description="Bans a user with a reason, logged to mod-log channel.")
-@commands.has_permissions(ban_members=True)
-async def ban(ctx: commands.Context, user: discord.Member, *, reason: str = "No reason provided."):
-    await user.ban(reason=reason)
-    await ctx.send(f"🔨 **{user.name}** has been permanently banned.")
-    await log_mod_action(ctx.guild, "Ban", user, ctx.author, reason)
-
-@bot.hybrid_command(name="unban", description="Unbans a user by ID.")
-@commands.has_permissions(ban_members=True)
-async def unban(ctx: commands.Context, user_id: str):
-    try:
-        user_obj = await bot.fetch_user(int(user_id))
-        await ctx.guild.unban(user_obj)
-        await ctx.send(f"🔓 Successfully unbanned: **{user_obj.name}**")
-        await log_mod_action(ctx.guild, "Unban", user_obj, ctx.author, "Unbanned via platform administration.")
-    except Exception as e:
-        await ctx.send(f"❌ Could not resolve user ID: {e}", ephemeral=True)
-
-@bot.hybrid_command(name="mute", description="Times out a user for a specified duration e.g. ,mute @user 10m")
-@commands.has_permissions(moderate_members=True)
-async def mute(ctx: commands.Context, user: discord.Member, duration: str, *, reason: str = "No reason provided."):
-    unit = duration[-1].lower()
-    try:
-        amount = int(duration[:-1])
-    except ValueError:
-        return await ctx.send("❌ Invalid format. Please use durations such as `10m`, `2h`, or `1d`.", ephemeral=True)
-        
-    if unit == "m":
-        delta = timedelta(minutes=amount)
-    elif unit == "h":
-        delta = timedelta(hours=amount)
-    elif unit == "d":
-        delta = timedelta(days=amount)
-    else:
-        return await ctx.send("❌ Invalid duration unit. Use 'm', 'h', or 'd'.", ephemeral=True)
-
-    await user.timeout(delta, reason=reason)
-    await ctx.send(f"🔇 {user.mention} has been timed out for `{duration}`.")
-    await log_mod_action(ctx.guild, f"Mute ({duration})", user, ctx.author, reason)
-
-@bot.hybrid_command(name="unmute", description="Removes timeout restrictions from a user.")
-@commands.has_permissions(moderate_members=True)
-async def unmute(ctx: commands.Context, user: discord.Member, *, reason: str = "No reason provided."):
-    await user.timeout(None, reason=reason)
-    await ctx.send(f"🔊 Restored voice/text permissions for: {user.mention}")
-    await log_mod_action(ctx.guild, "Unmute", user, ctx.author, reason)
-
-@bot.hybrid_command(name="purge", description="Bulk deletes X messages in a channel, staff only.")
-@commands.has_permissions(manage_messages=True)
-async def purge(ctx: commands.Context, amount: int):
-    if amount < 1:
-        return await ctx.send("❌ Purge amount must be higher than 0.", ephemeral=True)
-    deleted_items = await ctx.channel.purge(limit=amount)
-    await ctx.send(f"🧹 Cleaned up and deleted `{len(deleted_items)}` messages.", delete_after=5.0)
-
-@bot.hybrid_command(name="lock", description="Locks a channel so only staff can send messages.")
-@commands.has_permissions(manage_channels=True)
-async def lock(ctx: commands.Context):
-    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
-    await ctx.send("🔒 **Channel Locked Down:** Active write permissions restricted to staff teams.")
-
-@bot.hybrid_command(name="unlock", description="Unlocks a channel so all members can write again.")
-@commands.has_permissions(manage_channels=True)
-async def unlock(ctx: commands.Context):
-    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=None)
-    await ctx.send("🔓 **Channel Unlocked:** Normal access permissions restored.")
-
-@bot.hybrid_command(name="role", description="Adds or removes a role from a user e.g. ,role @user RoleName")
-@commands.has_permissions(manage_roles=True)
-async def role(ctx: commands.Context, user: discord.Member, *, role_name: str):
-    target_role = discord.utils.get(ctx.guild.roles, name=role_name)
-    if not target_role:
-        return await ctx.send(f"❌ Could not locate role matching: `{role_name}`", ephemeral=True)
-        
-    if target_role in user.roles:
-        await user.remove_roles(target_role)
-        await ctx.send(f"➖ Successfully removed role `{target_role.name}` from {user.mention}.")
-    else:
-        await user.add_roles(target_role)
-        await ctx.send(f"➕ Successfully added role `{target_role.name}` to {user.mention}.")
+# --- Unified Hybrid Command Matrix (Perfect compatibility for ',' and '/') ---
 
 @bot.hybrid_command(name="autorole", description="Configure the automatic role assigned to joining members.")
 @commands.has_permissions(administrator=True)
@@ -589,32 +421,30 @@ async def autorole(ctx: commands.Context, role: discord.Role):
     set_db_value(f"autorole_{ctx.guild.id}", role.id)
     await ctx.send(f"✨ **Success:** New users will automatically receive the {role.mention} role upon joining.")
 
+@bot.hybrid_command(name="purge", description="Deletes a specified volume of historical messages from the active channel.")
+@commands.has_permissions(manage_messages=True)
+async def purge(ctx: commands.Context, amount: int):
+    if amount < 1:
+        return await ctx.send("❌ Amount must be greater than zero.", ephemeral=True)
+    deleted_items = await ctx.channel.purge(limit=amount)
+    await ctx.send(f"🧹 Cleaned up and deleted `{len(deleted_items)}` messages.", delete_after=5.0)
+
 @bot.hybrid_command(name="welcome", description="Configure server greeting channel layout.")
 @commands.has_permissions(administrator=True)
 async def welcome(ctx: commands.Context, channel: discord.TextChannel):
     set_db_value(f"welcome_{ctx.guild.id}", channel.id)
     await ctx.send(f"✨ **Success:** Global greetings piped directly into {channel.mention}.")
 
-@bot.hybrid_command(name="setup_ticket", description="Deploys the upgraded premium menu menu panel framework layout.")
+@bot.hybrid_command(name="setup_ticket", description="Deploys the production framework panel layout configuration dashboard.")
 @commands.has_permissions(administrator=True)
 async def setup_ticket(ctx: commands.Context):
-    panel_text = (
-        "═══ nexusboosts — premium menu ═══\n\n"
-        "📦 [ package level 2 ] — 7x server boosts\n"
-        "├─ 🕒 1 month  │ $5.00 / £4.00\n"
-        "├─ 🗓️ 3 months │ $11.00 / £9.00\n"
-        "└─ 💎 6 months │ $20.00 / £16.00\n\n"
-        "💎 [ package level 3 ] — 14x server boosts\n"
-        "├─ 🕒 1 month  │ $8.00 / £6.50\n"
-        "├─ 🗓️ 3 months │ $18.00 / £14.50\n"
-        "└─ 💎 6 months │ $32.00 / £26.00\n"
-        "└─ 🛡️ full replacement warranty included\n\n"
-        "💳 [ payment methods ]\n"
-        "└─ 🪙 crypto (btc, ltc, eth)\n\n"
-        "Ready to order? Click the button below to secure your boosts."
-    )
     embed = discord.Embed(
-        description=panel_text,
+        title="═══ nexusboosts — premium menu ═══",
+        description=(
+            "✨ **[ package level 2 ]** — 7x server boosts\n├─ 1 month | $3.50 / £3.00\n├─ 3 months | $8.00 / £6.50\n└─ 6 months | $15.00 / £12.00\n\n"
+            "🚀 **[ package level 3 ]** — 14x server boosts\n├─ 1 month | $6.00 / £5.00\n├─ 3 months | $15.00 / £12.00\n└─ 6 months | $28.00 / £22.00\n└─ *full replacement warranty included*\n\n"
+            "💳 **[ payment methods ]**\n└─ crypto (btc, ltc, eth)\n\nReady to order? Click the button below to secure your boosts."
+        ),
         color=0x2B2D31,
     )
     await ctx.send(embed=embed, view=MainTicketPanel())
@@ -623,7 +453,7 @@ async def setup_ticket(ctx: commands.Context):
 @commands.has_permissions(manage_channels=True)
 async def rename(ctx: commands.Context, new_name: str):
     await ctx.channel.edit(name=new_name.lower().replace(" ", "-"))
-    await ctx.send(f"✅ Channel interface assigned to: `{new_name}`")
+    await ctx.send(f"✅ Context channel interface assigned locally to: `{new_name}`")
 
 @bot.hybrid_command(name="claim", description="Claim administrative handling responsibility ownership rights over active room.")
 @commands.has_permissions(manage_messages=True)
@@ -635,10 +465,10 @@ async def claim(ctx: commands.Context):
     
     if not row:
         conn.close()
-        return await ctx.send("❌ Error: This channel is not registered as an active checkout ticket.", ephemeral=True)
+        return await ctx.send("❌ Command execution domain failed: This channel is not registered as an active checkout ticket.", ephemeral=True)
     if row[0] is not None:
         conn.close()
-        return await ctx.send("❌ This support thread session has already been claimed.", ephemeral=True)
+        return await ctx.send("❌ This support thread session has already been claimed by another specialist handling agent.", ephemeral=True)
         
     c.execute("UPDATE tickets SET claimed_by=? WHERE channel_id=?", (ctx.author.id, ctx.channel.id))
     conn.commit()
@@ -646,7 +476,7 @@ async def claim(ctx: commands.Context):
     
     clean_name = ctx.channel.name.replace("-claimed", "")
     await ctx.channel.edit(name=f"{clean_name}-claimed-{ctx.author.name}")
-    await ctx.send(f"📋 Ticket handling assignments locked down by: {ctx.author.mention}")
+    await ctx.send(f"📋 Ticket handling assignments officially locked down by user: {ctx.author.mention}")
 
 @bot.hybrid_command(name="unclaim", description="Relinquish processing ownership assignments safely.")
 @commands.has_permissions(manage_messages=True)
@@ -685,7 +515,7 @@ async def close(ctx: commands.Context):
 @commands.has_permissions(manage_channels=True)
 async def adduser(ctx: commands.Context, user: discord.Member):
     await ctx.channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True)
-    await ctx.send(f"✅ Access privilege matrix opened up safely to: {user.mention}")
+    await ctx.send(f"✅ Access privilege matrix opened up safely to input profile: {user.mention}")
 
 @bot.hybrid_command(name="removeuser", description="De-authorize target profile identity clearance parameters immediately.")
 @commands.has_permissions(manage_channels=True)
