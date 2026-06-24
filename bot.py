@@ -17,9 +17,9 @@ LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID"))
 STAFF_ROLE_ID = int(os.getenv("STAFF_ROLE_ID"))
 BLACKLIST_ROLE_ID = int(os.getenv("BLACKLIST_ROLE_ID"))
 
-# Target ID structures updated as requested via your configuration profile mapping 
-REVIEW_LOG_CHANNEL_ID = 1519098165645541447
-VERIFIED_CUSTOMER_ROLE_ID = 1519094176350732368
+# Now properly pulling from your .env file
+REVIEW_LOG_CHANNEL_ID = int(os.getenv("REVIEW_LOG_CHANNEL_ID"))
+VERIFIED_CUSTOMER_ROLE_ID = int(os.getenv("VERIFIED_CUSTOMER_ROLE_ID"))
 
 PRICES = {
     "7x": {"1m": "$3.50 / £3.00", "3m": "$8.00 / £6.50", "6m": "$15.00 / £12.00"},
@@ -41,7 +41,6 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS tickets 
                  (channel_id INTEGER PRIMARY KEY, user_id INTEGER, status TEXT, last_msg_at TEXT, claimed_by INTEGER)''')
-    # Track order data parameters within state context to properly bind variables to feedback objects
     c.execute('''CREATE TABLE IF NOT EXISTS order_details
                  (channel_id INTEGER PRIMARY KEY, package_tier TEXT, duration TEXT, price TEXT, crypto_used TEXT)''')
     c.execute('''INSERT OR IGNORE INTO config (key, value) VALUES ('orders_completed', '0')''')
@@ -296,7 +295,6 @@ class PaymentSelectionView(View):
             item.disabled = True
         await interaction.message.edit(view=self)
 
-        # Store transactional variables safely inside relational database memory state
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute("INSERT OR REPLACE INTO order_details VALUES (?, ?, ?, ?, ?)", 
@@ -332,7 +330,6 @@ class PaymentSelectionView(View):
         await self.send_invoice(interaction, "ETH")
 
 
-# --- Staff Confirmation & Feedback Selection Matrix ---
 class StaffOrderConfirmationView(View):
     def __init__(self, buyer_id: int, detail_str: str, channel_id: int):
         super().__init__(timeout=None)
@@ -348,7 +345,6 @@ class StaffOrderConfirmationView(View):
         new_count = increment_orders()
         await interaction.response.send_message(f"🟢 Order validated by {interaction.user.mention}. Internal Order Counter updated to: **{new_count}**")
 
-        # Assign verified customer role directly to purchasing target ID structure as requested
         buyer_member = interaction.guild.get_member(self.buyer_id)
         if buyer_member:
             role_object = interaction.guild.get_role(VERIFIED_CUSTOMER_ROLE_ID)
@@ -386,7 +382,6 @@ class ReviewSystemView(View):
         select.disabled = True
         await interaction.message.edit(view=self)
         
-        # Read the stored tracking details from runtime state database storage maps
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute("SELECT package_tier, duration, price, crypto_used FROM order_details WHERE channel_id=?", (interaction.channel.id,))
@@ -398,7 +393,6 @@ class ReviewSystemView(View):
         prc = row[2] if row else "N/A"
         crp = row[3] if row else "N/A"
 
-        # Routing performance values directly into the custom requested feedback log channel endpoint configuration
         review_channel = interaction.guild.get_channel(REVIEW_LOG_CHANNEL_ID)
         if review_channel:
             rev_embed = discord.Embed(title="✨ New Feedback Verification Record", color=0xF1C40F)
@@ -412,16 +406,15 @@ class ReviewSystemView(View):
         await interaction.response.send_message("💖 Thank you for your feedback validation! Your response has been securely filed.")
 
 # --- Upgraded Slash Commands Matrix ---
-@bot.tree.command(name="purge", description="Deletes a specified volume of historical content records from active channel configuration array.")
+@bot.tree.command(name="purga", description="Deletes a specified volume of historical content records from active channel configuration array.")
 @app_commands.checks.has_permissions(manage_messages=True)
-async def purge(interaction: discord.Interaction, amount: int):
+async def purga(interaction: discord.Interaction, amount: int):
     if amount < 1:
-        return await interaction.response.send_message("❌ Amount argument parameters must hold a sequence integer evaluation greater than zero.", ephemeral=True)
+        return await interaction.response.send_message("❌ Amount must be greater than zero.", ephemeral=True)
     
-    # Defer interaction to provide leeway processing message structures over thread contexts safely
     await interaction.response.defer(ephemeral=True)
     deleted_items = await interaction.channel.purge(limit=amount)
-    await interaction.followup.send(f"🧹 Cleaned up and deleted `{len(deleted_items)}` active items from historical context logs.", ephemeral=True)
+    await interaction.followup.send(f"🧹 Cleaned up and deleted `{len(deleted_items)}` messages.", ephemeral=True)
 
 @bot.tree.command(name="welcome", description="Configure server greeting channel layout.")
 @app_commands.checks.has_permissions(administrator=True)
@@ -525,7 +518,7 @@ async def blacklist(interaction: discord.Interaction, user: discord.Member):
         await user.add_roles(role)
         await interaction.response.send_message(f"🔒 Operational lock assigned. User profile {user.mention} is now completely blacklisted from tickets.")
     else:
-        await interaction.response.send_message("❌ Configuration structure mismatch: Blacklist Role Identifier could not be resolved from values mapping array.", ephemeral=True)
+        await interaction.response.send_message("❌ Configuration structure mismatch.", ephemeral=True)
 
 @bot.tree.command(name="unblacklist", description="Restore operational creation clearance properties to input tracking target node mapping parameters.")
 @app_commands.checks.has_permissions(administrator=True)
