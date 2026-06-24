@@ -1,6 +1,7 @@
 import os
 import asyncio
 import sqlite3
+import re
 from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
@@ -20,7 +21,7 @@ BLACKLIST_ROLE_ID = int(os.getenv("BLACKLIST_ROLE_ID"))
 REVIEW_LOG_CHANNEL_ID = int(os.getenv("REVIEW_LOG_CHANNEL_ID"))
 VERIFIED_CUSTOMER_ROLE_ID = int(os.getenv("VERIFIED_CUSTOMER_ROLE_ID"))
 
-# UPDATED: Matching the new menu rates precisely
+# New Menu Rates Configuration Matrix
 PRICES = {
     "7x": {"1 Month": "$5.00 / £4.00", "3 Months": "$11.00 / £9.00", "6 Months": "$20.00 / £16.00"},
     "14x": {"1 Month": "$8.00 / £6.50", "3 Months": "$18.00 / £14.50", "6 Months": "$32.00 / £26.00"},
@@ -43,6 +44,8 @@ def init_db():
                  (channel_id INTEGER PRIMARY KEY, user_id INTEGER, status TEXT, last_msg_at TEXT, claimed_by INTEGER)''')
     c.execute('''CREATE TABLE IF NOT EXISTS order_details
                  (channel_id INTEGER PRIMARY KEY, package_tier TEXT, duration TEXT, price TEXT, crypto_used TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS warnings 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, guild_id INTEGER, reason TEXT, moderator_id INTEGER, timestamp TEXT)''')
     c.execute('''INSERT OR IGNORE INTO config (key, value) VALUES ('orders_completed', '0')''')
     conn.commit()
     conn.close()
@@ -73,6 +76,53 @@ def increment_orders():
     conn.commit()
     conn.close()
     return val
+
+# --- Helper Moderation Log Broadcaster ---
+async def send_mod_log(guild: discord.Guild, action: str, moderator: discord.Member, target: str, reason: str):
+    log_channel = guild.get_channel(LOG_CHANNEL_ID)
+    if not log_channel:
+        return
+    embed = discord.Embed(title=f"🛡️ Mod Log — {action}", color=0xE74C3C, timestamp=datetime.now(timezone.utc))
+    embed.add_field(name="Target Entity", value=target, inline=True)
+    embed.add_field(name="Responsible Agent", value=moderator.mention, inline=True)
+    embed.add_field(name="Reason Provided", value=reason, inline=False)
+    await log_channel.send(embed=embed)
+
+# --- Parse Duration Text ---
+def parse_duration(duration_str: str) -> int:
+    match = re.match(r"(\d+)([smhd])", duration_str.lower())
+    if not match:
+        return 0
+    amount, unit = int(match.group(1)), match.group(2)
+    if unit == "s": return amount
+    if unit == "m": return amount * 60
+    if unit == "h": return amount * 3600
+    if unit == "d": return amount * 86400
+    return 0
+
+# --- Helper Function: Generate Live Transcript Array ---
+async def build_transcript_file(channel: discord.TextChannel):
+    transcript = f"--- Transcript for Ticket Channel: {channel.name} ---\n"
+    async for message in channel.history(limit=1000, oldest_first=True):
+        time_str = message.created_at.strftime('%Y-%m-%d %H:%M:%S')
+        transcript += f"[{time_str}] {message.author}: {message.content}\n"
+        if message.attachments:
+            for attach in message.attachments:
+                transcript += f"   [Attachment: {attach.url}]\n"
+                
+    file_path = f"transcript-{channel.name}.txt"
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(transcript)
+    return file_path
+
+# --- Helper Function: Standard Ticket Deletion Database Cleanup ---
+def purge_ticket_db(channel_id: int):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM tickets WHERE channel_id=?", (channel_id,))
+    c.execute("DELETE FROM order_details WHERE channel_id=?", (channel_id,))
+    conn.commit()
+    conn.close()
 
 # --- Custom Bot Class ---
 class NexusBot(commands.Bot):
@@ -117,7 +167,8 @@ class NexusBot(commands.Bot):
             
             if last_msg_time and last_msg_time < threshold:
                 await channel.send("⏳ **Ticket automatically closing due to 24 hours of absolute inactivity.**")
-                await handle_ticket_close(channel, self)
+                purge_ticket_db(channel.id)
+                await channel.delete()
                 
         conn.commit()
         conn.close()
@@ -144,44 +195,6 @@ async def on_member_join(member):
         channel = member.guild.get_channel(int(welcome_ch_id))
         if channel:
             await channel.send(f"Welcome To NexusBoosts {member.mention}!")
-
-# --- Helper Function: Transcript & Cleanup ---
-async def handle_ticket_close(channel: discord.TextChannel, client: commands.Bot):
-    transcript = f"--- Transcript for Ticket Channel: {channel.name} ---\n"
-    async for message in channel.history(limit=1000, oldest_first=True):
-        time_str = message.created_at.strftime('%Y-%m-%d %H:%M:%S')
-        transcript += f"[{time_str}] {message.author}: {message.content}\n"
-        if message.attachments:
-            for attach in message.attachments:
-                transcript += f"   [Attachment: {attach.url}]\n"
-
-    file_path = f"transcript-{channel.name}.txt"
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(transcript)
-
-    log_channel = channel.guild.get_channel(LOG_CHANNEL_ID)
-    if log_channel:
-        embed = discord.Embed(
-            title="🔒 Ticket Closed & Archived",
-            description=f"Ticket channel `{channel.name}` has been successfully cleaned up.",
-            color=0xD32F2F
-        )
-        await log_channel.send(embed=embed, file=discord.File(file_path))
-
-    try:
-        os.remove(file_path)
-    except:
-        pass
-
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("DELETE FROM tickets WHERE channel_id=?", (channel.id,))
-    c.execute("DELETE FROM order_details WHERE channel_id=?", (channel.id,))
-    conn.commit()
-    conn.close()
-
-    await asyncio.sleep(3)
-    await channel.delete()
 
 # --- Main Ticket Dashboard View ---
 class MainTicketPanel(View):
@@ -255,8 +268,10 @@ class OrderSelectionView(View):
 
     @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒")
     async def close_ticket(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("Closing ticket and compiling logs...")
-        await handle_ticket_close(interaction.channel, bot)
+        await interaction.response.send_message("Closing ticket channel space immediately...")
+        purge_ticket_db(interaction.channel.id)
+        await asyncio.sleep(2)
+        await interaction.channel.delete()
 
 
 class DurationSelectionView(View):
@@ -264,7 +279,7 @@ class DurationSelectionView(View):
         super().__init__(timeout=None)
         self.package_tier = package_tier
 
-    async def handle_duration_selection(self, interaction: discord.Interaction, duration_key: str, label: str):
+    async def handle_duration_selection(self, interaction: discord.Interaction, label: str):
         for item in self.children:
             item.disabled = True
         await interaction.message.edit(view=self)
@@ -279,15 +294,15 @@ class DurationSelectionView(View):
 
     @discord.ui.button(label="1 Month", style=discord.ButtonStyle.secondary)
     async def one_month(self, interaction: discord.Interaction, button: Button):
-        await self.handle_duration_selection(interaction, "1m", "1 Month")
+        await self.handle_duration_selection(interaction, "1 Month")
 
     @discord.ui.button(label="3 Months", style=discord.ButtonStyle.secondary)
     async def three_months(self, interaction: discord.Interaction, button: Button):
-        await self.handle_duration_selection(interaction, "3m", "3 Months")
+        await self.handle_duration_selection(interaction, "3 Months")
 
     @discord.ui.button(label="6 Months", style=discord.ButtonStyle.secondary)
     async def six_months(self, interaction: discord.Interaction, button: Button):
-        await self.handle_duration_selection(interaction, "6m", "6 Months")
+        await self.handle_duration_selection(interaction, "6 Months")
 
 
 class PaymentSelectionView(View):
@@ -413,7 +428,144 @@ class ReviewSystemView(View):
         await interaction.response.send_message("💖 Thank you for your feedback validation! Your response has been securely filed.")
 
 
-# --- Unified Hybrid Command Matrix ---
+# --- Unified Hybrid Command Matrix (Dual operational on both ',' and '/') ---
+
+@bot.hybrid_command(name="transcript", description="Manually requests and pipes the conversation log file into the active channel.")
+@commands.has_permissions(manage_messages=True)
+async def transcript(ctx: commands.Context):
+    await ctx.defer()
+    path = await build_transcript_file(ctx.channel)
+    await ctx.send(content="📄 **Manual Channel Transcript Compiled:**", file=discord.File(path))
+    try:
+        os.remove(path)
+    except:
+        pass
+
+@bot.hybrid_command(name="setstatus", description="Lets staff update a custom bot status/presence message on demand.")
+@commands.has_permissions(manage_messages=True)
+async def setstatus(ctx: commands.Context, *, status_text: str):
+    await bot.change_presence(activity=discord.CustomActivity(name=status_text))
+    await ctx.send(f"✅ Status payload revised to: *{status_text}*")
+
+@bot.hybrid_command(name="slowmode", description="Sets slowmode on a channel to prevent message spam from people.")
+@commands.has_permissions(manage_channels=True)
+async def slowmode(ctx: commands.Context, seconds: int):
+    await ctx.channel.edit(slowmode_delay=seconds)
+    await ctx.send(f"⏱️ Slowmode set to `{seconds}` seconds for this channel.")
+
+@bot.hybrid_command(name="warn", description="Issues a warning to a user, logged silently to a mod-log channel.")
+@commands.has_permissions(manage_messages=True)
+async def warn(ctx: commands.Context, user: discord.Member, *, reason: str = "No reason provided."):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT INTO warnings (user_id, guild_id, reason, moderator_id, timestamp) VALUES (?, ?, ?, ?, ?)",
+              (user.id, ctx.guild.id, reason, ctx.author.id, datetime.now(timezone.utc).isoformat()))
+    conn.commit()
+    conn.close()
+    
+    await ctx.send(f"⚠️ {user.mention} has been warned successfully.", ephemeral=True)
+    await send_mod_log(ctx.guild, "User Warning Issued", ctx.author, user.mention, reason)
+
+@bot.hybrid_command(name="warnings", description="Displays how many warnings a user has accumulated.")
+@commands.has_permissions(manage_messages=True)
+async def warnings(ctx: commands.Context, user: discord.Member):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT reason, moderator_id, timestamp FROM warnings WHERE user_id=? AND guild_id=?", (user.id, ctx.guild.id))
+    rows = c.fetchall()
+    conn.close()
+    
+    if not rows:
+        return await ctx.send(f"✅ {user.mention} holds a pristine file with 0 active warnings.")
+        
+    embed = discord.Embed(title=f"📋 Infraction History: {user.name}", color=0xF1C40F)
+    for index, (reason, mod_id, ts) in enumerate(rows, 1):
+        parsed_time = datetime.fromisoformat(ts).strftime('%Y-%m-%d %H:%M')
+        embed.add_field(name=f"Infraction #{index} ({parsed_time})", value=f"**Reason:** {reason}\n**Issued By:** <@{mod_id}>", inline=False)
+    await ctx.send(embed=embed)
+
+@bot.hybrid_command(name="clearwarnings", description="Removes all warnings from a user, admin only.")
+@commands.has_permissions(administrator=True)
+async def clearwarnings(ctx: commands.Context, user: discord.Member):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM warnings WHERE user_id=? AND guild_id=?", (user.id, ctx.guild.id))
+    conn.commit()
+    conn.close()
+    
+    await ctx.send(f"♻️ Cleared all warning histories completely for {user.mention}.")
+    await send_mod_log(ctx.guild, "Warning Track Purged", ctx.author, user.mention, "Administrative file reset.")
+
+@bot.hybrid_command(name="kick", description="Kicks a user with a reason, logged to mod-log channel.")
+@commands.has_permissions(kick_members=True)
+async def kick(ctx: commands.Context, user: discord.Member, *, reason: str = "No reason provided."):
+    await user.kick(reason=reason)
+    await ctx.send(f"👢 successfully booted {user.name} from the server.")
+    await send_mod_log(ctx.guild, "Member Kicked", ctx.author, f"{user.name} ({user.id})", reason)
+
+@bot.hybrid_command(name="ban", description="Bans a user with a reason, logged to mod-log channel.")
+@commands.has_permissions(ban_members=True)
+async def ban(ctx: commands.Context, user: discord.Member, *, reason: str = "No reason provided."):
+    await user.ban(reason=reason)
+    await ctx.send(f"🔨 Perm-banned {user.name} from the guild infrastructure.")
+    await send_mod_log(ctx.guild, "User Banned", ctx.author, f"{user.name} ({user.id})", reason)
+
+@bot.hybrid_command(name="unban", description="Unbans a user by ID.")
+@commands.has_permissions(ban_members=True)
+async def unban(ctx: commands.Context, user_id: str, *, reason: str = "No reason provided."):
+    try:
+        uid = int(user_id)
+        user_obj = await bot.fetch_user(uid)
+        await ctx.guild.unban(user_obj, reason=reason)
+        await ctx.send(f"🔓 Restored structural access to user ID: {user_id}.")
+        await send_mod_log(ctx.guild, "User Unbanned", ctx.author, f"{user_obj.name} ({user_id})", reason)
+    except Exception:
+        await ctx.send("❌ Valid Target entry not located. Verify User ID configuration syntax.", ephemeral=True)
+
+@bot.hybrid_command(name="mute", description="Times out a user for a specified duration e.g. ,mute @user 10m")
+@commands.has_permissions(moderate_members=True)
+async def mute(ctx: commands.Context, user: discord.Member, duration: str, *, reason: str = "No reason provided."):
+    seconds = parse_duration(duration)
+    if seconds <= 0:
+        return await ctx.send("❌ Invalid timeframe notation. Format examples: `10m`, `2h`, `1d`.", ephemeral=True)
+        
+    delta = timedelta(seconds=seconds)
+    await user.timeout(delta, reason=reason)
+    await ctx.send(f"🔇 Put {user.mention} on timeout for {duration}.")
+    await send_mod_log(ctx.guild, "Timeout / Mute Action", ctx.author, user.mention, f"Duration: {duration} | Reason: {reason}")
+
+@bot.hybrid_command(name="unmute", description="Removes timeout restrictions from a user.")
+@commands.has_permissions(moderate_members=True)
+async def unmute(ctx: commands.Context, user: discord.Member, *, reason: str = "No reason provided."):
+    await user.timeout(None, reason=reason)
+    await ctx.send(f"🔊 Restored voice/text privileges to {user.mention}.")
+    await send_mod_log(ctx.guild, "Timeout Terminated", ctx.author, user.mention, reason)
+
+@bot.hybrid_command(name="lock", description="Locks down writing permissions on the active channel for general members.")
+@commands.has_permissions(manage_channels=True)
+async def lock(ctx: commands.Context):
+    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
+    await ctx.send("🔒 **Channel locked down.** Structural permissions modified.")
+
+@bot.hybrid_command(name="unlock", description="Unlocks channel text writing loops back to normal parameters.")
+@commands.has_permissions(manage_channels=True)
+async def unlock(ctx: commands.Context):
+    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=None)
+    await ctx.send("🔓 **Channel unlocked.** Standard interaction channels restored.")
+
+@bot.hybrid_command(name="role", description="Adds or removes a role from a user e.g. ,role @user RoleName")
+@commands.has_permissions(manage_roles=True)
+async def role(ctx: commands.Context, user: discord.Member, *, role_name: str):
+    target_role = discord.utils.get(ctx.guild.roles, name=role_name)
+    if not target_role:
+        return await ctx.send(f"❌ Role target string `{role_name}` could not be resolved.", ephemeral=True)
+        
+    if target_role in user.roles:
+        await user.remove_roles(target_role)
+        await ctx.send(f"🚫 Stripped role {target_role.name} from profile: {user.mention}")
+    else:
+        await user.add_roles(target_role)
+        await ctx.send(f"✅ Allocated role {target_role.name} to target user profile: {user.mention}")
 
 @bot.hybrid_command(name="autorole", description="Configure the automatic role assigned to joining members.")
 @commands.has_permissions(administrator=True)
@@ -438,7 +590,6 @@ async def welcome(ctx: commands.Context, channel: discord.TextChannel):
 @bot.hybrid_command(name="setup_ticket", description="Deploys the production framework panel layout configuration dashboard.")
 @commands.has_permissions(administrator=True)
 async def setup_ticket(ctx: commands.Context):
-    # FIXED: Layout matches layout and pricing requested directly
     embed = discord.Embed(
         title="═══ nexusboosts — premium menu ═══",
         description=(
@@ -519,7 +670,9 @@ async def stats(ctx: commands.Context):
 @commands.has_permissions(manage_channels=True)
 async def close(ctx: commands.Context):
     await ctx.send("Closing connection space layout mapping loops completely...")
-    await handle_ticket_close(ctx.channel, bot)
+    purge_ticket_db(ctx.channel.id)
+    await asyncio.sleep(2)
+    await ctx.channel.delete()
 
 @bot.hybrid_command(name="adduser", description="Explicitly add external tracking profile entity context to channel array mappings.")
 @commands.has_permissions(manage_channels=True)
